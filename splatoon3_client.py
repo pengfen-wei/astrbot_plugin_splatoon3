@@ -170,7 +170,7 @@ class Splatoon3Client:
     async def _fetch_data(self, endpoint: str) -> dict:
         """从API获取数据"""
         cached = await self._get_cached_data(endpoint)
-        if cached:
+        if cached is not None:
             self._log_api_data(f"{endpoint} (cached)", cached)
             return cached
 
@@ -217,9 +217,6 @@ class Splatoon3Client:
                     raise Splatoon3DataError(f"获取本地化数据失败: {response.status}")
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             raise Splatoon3NetworkError(f"网络请求失败: {str(e)}") from e
-        except Exception as e:
-            logger.error(f"[Splatoon3] 获取本地化数据失败: {str(e)}")
-            raise Splatoon3DataError(f"获取本地化数据失败: {str(e)}") from e
 
     def _translate_by_id(self, item_id: str, locale: dict, category: str = "stages", field: str = "name") -> str:
         """根据ID翻译
@@ -445,16 +442,15 @@ class Splatoon3Client:
             event = league_match_setting.get("leagueMatchEvent", {})
             time_periods = challenge.get("timePeriods", [])
 
-            # 获取第一个时间段
-            first_period = time_periods[0] if time_periods else {}
-
-            result.append({
-                "name": self._translate_by_id(event.get("id"), locale, "events") or event.get("name", ""),
-                "description": self._translate_by_id(event.get("id"), locale, "events", "desc") or event.get("desc", ""),
-                "start_time": self._format_time(first_period.get("startTime")),
-                "end_time": self._format_time(first_period.get("endTime")),
-                "regulation": event.get("regulation", ""),
-            })
+            # 为每个时间段创建一个挑战条目
+            for period in time_periods:
+                result.append({
+                    "name": self._translate_by_id(event.get("id"), locale, "events") or event.get("name", ""),
+                    "description": self._translate_by_id(event.get("id"), locale, "events", "desc") or event.get("desc", ""),
+                    "start_time": self._format_time(period.get("startTime")),
+                    "end_time": self._format_time(period.get("endTime")),
+                    "regulation": event.get("regulation", ""),
+                })
 
         return result
 

@@ -93,7 +93,7 @@ class Splatoon3Plugin(Star):
     def _get_user_id(self, event: AstrMessageEvent) -> str:
         """获取用户唯一标识"""
         platform = getattr(event, 'platform', getattr(event, 'platform_name', 'unknown'))
-        sender_id = 'unknown'
+        sender_id = None
         # 尝试获取用户ID的不同属性名
         for attr in ['sender_id', 'user_id', 'from_user', 'from_user_id']:
             if hasattr(event, attr):
@@ -102,23 +102,24 @@ class Splatoon3Plugin(Star):
                     # 确保值是字符串类型，避免对象引用导致的不稳定
                     sender_id = str(value)
                     break
+        
+        if sender_id is None:
+            raise ValueError(f"无法从事件中获取用户ID，平台: {platform}")
+        
         return f"{platform}_{sender_id}"
 
     async def _get_user_language(self, user_id: str) -> str:
         """获取用户设置的语言"""
-        # 先检查是否需要创建默认配置
-        need_save = False
         async with self._config_lock:
             if user_id not in self.user_configs:
                 self.user_configs[user_id] = {"language": "zh-CN"}
-                need_save = True
-            language = self.user_configs[user_id].get("language", "zh-CN")
-        
-        # 在锁外部保存配置，避免死锁
-        if need_save:
-            await self._save_user_configs()
-        
-        return language
+                # 在锁内保存配置，避免并发覆盖
+                try:
+                    with open(self.user_config_file, "w", encoding="utf-8") as f:
+                        json.dump(self.user_configs, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    logger.error(f"[Splatoon3] 保存用户配置失败: {str(e)}")
+            return self.user_configs[user_id].get("language", "zh-CN")
 
     async def _set_user_language(self, user_id: str, language: str):
         """设置用户语言"""
@@ -126,8 +127,12 @@ class Splatoon3Plugin(Star):
             if user_id not in self.user_configs:
                 self.user_configs[user_id] = {}
             self.user_configs[user_id]["language"] = language
-        # 在锁外部保存配置，避免死锁
-        await self._save_user_configs()
+            # 在锁内保存配置，避免并发覆盖
+            try:
+                with open(self.user_config_file, "w", encoding="utf-8") as f:
+                    json.dump(self.user_configs, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.error(f"[Splatoon3] 保存用户配置失败: {str(e)}")
         
         # 清除缓存的客户端实例，确保下次获取时使用新语言
         client_to_close = None
@@ -135,6 +140,9 @@ class Splatoon3Plugin(Star):
             if user_id in self.clients:
                 client_to_close = self.clients[user_id]
                 del self.clients[user_id]
+            # 同步清理最后使用时间
+            if user_id in self.clients_last_used:
+                del self.clients_last_used[user_id]
         
         # 在锁外部关闭客户端，避免锁内等待
         if client_to_close and hasattr(client_to_close, 'close'):
@@ -247,6 +255,9 @@ class Splatoon3Plugin(Star):
             try:
                 await asyncio.sleep(self.cleanup_interval)
                 await self._cleanup_expired_clients()
+            except asyncio.CancelledError:
+                logger.info("[Splatoon3] 定时清理任务被取消")
+                raise
             except Exception as e:
                 logger.error(f"[Splatoon3] 定时清理任务失败: {str(e)}")
 
