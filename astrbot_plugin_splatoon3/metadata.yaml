@@ -1,0 +1,27 @@
+name: astrbot_plugin_splatoon3
+display_name: Splatoon3 斯普拉遁3查询
+author: VehP
+version: 1.0.0
+description: 查询Splatoon3游戏数据，包括地图轮换、鲑鱼跑、挑战、祭典、装备商店等信息
+repo: "https://github.com/VhePloon/astrbot_plugin_splatoon3"
+tags:
+  - splatoon3
+  - game
+  - nintendo
+  - switch
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - wecom
+  - lark
+  - dingtalk
+  - discord
+  - slack
+  - kook
+  - vocechat
+  - weixin_official_accounts
+  - satori
+  - misskey
+  - line
+astrbot_version: ">=4.16"

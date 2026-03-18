@@ -1,0 +1,8 @@
+# Splatoon3 插件配置文件
+# 将此文件放在插件根目录下
+
+# 调试模式：启用后会在日志中输出API源数据
+debug: true
+
+# 默认语言（可选，默认为 zh-CN）
+# default_language: zh-CN
