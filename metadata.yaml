@@ -1,6 +1,6 @@
 name: astrbot_plugin_splatoon3
 display_name: Splatoon3 斯普拉遁3查询
-author: PfwE
+author: Pfw
 version: 1.0.0
 description: 查询Splatoon3游戏数据，包括地图轮换、鲑鱼跑、挑战、祭典、装备商店等信息
 repo: "https://github.com/pengfen-wei/astrbot_plugin_splatoon3"
