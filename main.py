@@ -58,6 +58,8 @@ class Splatoon3Plugin(Star):
         self.cleanup_interval = self.config.get("cleanup_interval", 600)
         # 配置保存间隔（秒），默认5分钟
         self.config_save_interval = self.config.get("config_save_interval", 300)
+        # 最大缓存条目数，默认50
+        self.max_cache_size = self.config.get("max_cache_size", 50)
         # 清理任务
         self._cleanup_task = None
         # 配置保存任务
@@ -85,7 +87,25 @@ class Splatoon3Plugin(Star):
         if self.user_config_file.exists():
             try:
                 with open(self.user_config_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    # 校验顶层结构是否为dict
+                    if not isinstance(data, dict):
+                        logger.error(f"[Splatoon3] 用户配置文件格式错误，期望dict类型，实际为{type(data)}")
+                        return {}
+                    # 校验每个用户配置项的结构
+                    for user_id, config in data.items():
+                        if not isinstance(config, dict):
+                            logger.warning(f"[Splatoon3] 用户 {user_id} 配置格式错误，已跳过")
+                            continue
+                        # 确保language字段存在且有效
+                        if "language" not in config:
+                            config["language"] = "zh-CN"
+                        elif config["language"] not in Splatoon3Client.LANGUAGES:
+                            logger.warning(f"[Splatoon3] 用户 {user_id} 语言代码 {config['language']} 无效，已重置为默认值")
+                            config["language"] = "zh-CN"
+                    return data
+            except json.JSONDecodeError as e:
+                logger.error(f"[Splatoon3] 用户配置文件JSON解析失败: {str(e)}")
             except Exception as e:
                 logger.error(f"[Splatoon3] 加载用户配置失败: {str(e)}")
         return {}
@@ -96,6 +116,8 @@ class Splatoon3Plugin(Star):
             try:
                 with open(self.user_config_file, "w", encoding="utf-8") as f:
                     json.dump(self.user_configs, f, ensure_ascii=False, indent=2)
+                # 保存成功后重置脏标记
+                self._config_dirty = False
             except Exception as e:
                 logger.error(f"[Splatoon3] 保存用户配置失败: {str(e)}")
 
@@ -227,7 +249,7 @@ class Splatoon3Plugin(Star):
         language = await self._get_user_language(user_id)
         
         # 在锁外部创建客户端实例
-        new_client = Splatoon3Client(language=language, debug=self.debug)
+        new_client = Splatoon3Client(language=language, debug=self.debug, max_cache_size=self.max_cache_size)
         
         # 将新客户端添加到缓存（使用锁）
         async with self._client_lock:
@@ -300,7 +322,9 @@ class Splatoon3Plugin(Star):
         while True:
             try:
                 await asyncio.sleep(self.config_save_interval)
-                await self._save_user_configs()
+                # 只在配置脏标记为True时才保存
+                if self._config_dirty:
+                    await self._save_user_configs()
             except asyncio.CancelledError:
                 logger.info("[Splatoon3] 定时配置保存任务被取消")
                 raise
@@ -362,7 +386,11 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3语言")
     async def splat3_lang(self, event: AstrMessageEvent, lang_code: str = None):
         """设置或查看语言"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
 
         if not lang_code:
             # 显示支持的语言列表
@@ -430,7 +458,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3当前")
     async def splat3_current(self, event: AstrMessageEvent):
         """查询当前地图"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -445,7 +478,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3下一")
     async def splat3_next(self, event: AstrMessageEvent):
         """查询下一时段地图"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -464,7 +502,12 @@ class Splatoon3Plugin(Star):
         Args:
             mode: 模式类型 (regular, bankara, x, fest)
         """
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -511,7 +554,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3鲑鱼")
     async def splat3_coop(self, event: AstrMessageEvent):
         """查询鲑鱼跑日程"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -540,7 +588,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3挑战")
     async def splat3_challenge(self, event: AstrMessageEvent):
         """查询挑战活动"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -569,7 +622,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3装备")
     async def splat3_gear(self, event: AstrMessageEvent):
         """查询Splatnet装备"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -633,7 +691,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3祭典进行")
     async def splat3_fest_running(self, event: AstrMessageEvent, region: str = None):
         """查询正在进行的祭典"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -641,6 +704,9 @@ class Splatoon3Plugin(Star):
             title = "🎉 正在进行的祭典"
             result = self._format_festivals(festivals, title)
             yield event.plain_result(result)
+        except ValueError as e:
+            logger.error(f"[Splatoon3] 区域参数错误: {str(e)}")
+            yield event.plain_result(f"❌ {str(e)}")
         except Exception as e:
             logger.error(f"[Splatoon3] 获取祭典信息失败: {str(e)}")
             yield event.plain_result("❌ 获取祭典信息失败，请稍后重试")
@@ -648,7 +714,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3祭典即将")
     async def splat3_fest_upcoming(self, event: AstrMessageEvent, region: str = None):
         """查询即将开始的祭典"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -656,6 +727,9 @@ class Splatoon3Plugin(Star):
             title = "📅 即将开始的祭典"
             result = self._format_festivals(festivals, title)
             yield event.plain_result(result)
+        except ValueError as e:
+            logger.error(f"[Splatoon3] 区域参数错误: {str(e)}")
+            yield event.plain_result(f"❌ {str(e)}")
         except Exception as e:
             logger.error(f"[Splatoon3] 获取祭典信息失败: {str(e)}")
             yield event.plain_result("❌ 获取祭典信息失败，请稍后重试")
@@ -663,7 +737,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3祭典过去")
     async def splat3_fest_past(self, event: AstrMessageEvent, region: str = None):
         """查询过去的祭典"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -671,6 +750,9 @@ class Splatoon3Plugin(Star):
             title = "📜 过去的祭典"
             result = self._format_festivals(festivals, title)
             yield event.plain_result(result)
+        except ValueError as e:
+            logger.error(f"[Splatoon3] 区域参数错误: {str(e)}")
+            yield event.plain_result(f"❌ {str(e)}")
         except Exception as e:
             logger.error(f"[Splatoon3] 获取祭典信息失败: {str(e)}")
             yield event.plain_result("❌ 获取祭典信息失败，请稍后重试")
@@ -678,7 +760,12 @@ class Splatoon3Plugin(Star):
     @filter.command("splat3祭典")
     async def splat3_fest_all(self, event: AstrMessageEvent, region: str = None):
         """查询所有祭典信息（进行中、即将开始、过去的）"""
-        user_id = self._get_user_id(event)
+        try:
+            user_id = self._get_user_id(event)
+        except ValueError as e:
+            yield event.plain_result(f"❌ 无法获取用户信息: {str(e)}")
+            return
+        
         client = await self._get_client(user_id)
 
         try:
@@ -703,15 +790,17 @@ class Splatoon3Plugin(Star):
             else:
                 result += "📅 即将开始的祭典\n" + "-" * 20 + "\n暂无相关祭典信息\n\n"
 
-            # 过去的祭典（只显示最近3个）
+            # 过去的祭典
             if past_festivals:
-                result += "📜 最近的祭典\n" + "-" * 20 + "\n\n"
-                result += self._format_festivals(past_festivals[:3], "")  # 只显示最近3个
+                result += "📜 过去的祭典\n" + "-" * 20 + "\n\n"
+                result += self._format_festivals(past_festivals[:3], "")
             else:
-                result += "📜 最近的祭典\n" + "-" * 20 + "\n暂无相关祭典信息\n\n"
+                result += "📜 过去的祭典\n" + "-" * 20 + "\n暂无相关祭典信息\n\n"
 
             yield event.plain_result(result.strip())
-
+        except ValueError as e:
+            logger.error(f"[Splatoon3] 区域参数错误: {str(e)}")
+            yield event.plain_result(f"❌ {str(e)}")
         except Exception as e:
             logger.error(f"[Splatoon3] 获取祭典信息失败: {str(e)}")
             yield event.plain_result("❌ 获取祭典信息失败，请稍后重试")

@@ -1,6 +1,5 @@
 """API测试（使用pytest框架）"""
 import pytest
-import asyncio
 from splatoon3_client import Splatoon3Client
 
 

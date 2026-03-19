@@ -61,7 +61,7 @@ class Splatoon3Client:
     # API 基础URL
     BASE_URL = "https://splatoon3.ink/data"
 
-    def __init__(self, language: str = "zh-CN", user_agent: str = None, cache_enabled: bool = True, cache_ttl: int = 60, debug: bool = False):
+    def __init__(self, language: str = "zh-CN", user_agent: str = None, cache_enabled: bool = True, cache_ttl: int = 60, max_cache_size: int = 50, debug: bool = False):
         """初始化客户端
 
         Args:
@@ -69,6 +69,7 @@ class Splatoon3Client:
             user_agent: 自定义User-Agent
             cache_enabled: 是否启用缓存
             cache_ttl: 缓存过期时间（秒）
+            max_cache_size: 最大缓存条目数
             debug: 是否启用调试模式（输出API源数据到日志）
         """
         if language not in self.LANGUAGES:
@@ -78,6 +79,7 @@ class Splatoon3Client:
         self.user_agent = user_agent or "AstrBot-Splatoon3-Plugin/1.0"
         self.cache_enabled = cache_enabled
         self.cache_ttl = cache_ttl
+        self.max_cache_size = max_cache_size
         self.debug = debug
         self._cache: dict[str, dict[str, Any]] = {}
         self._locale_cache: dict[str, dict] = {}
@@ -87,6 +89,8 @@ class Splatoon3Client:
         self._cache_lock = asyncio.Lock()
         # 缓存访问时间，用于主动驱逐
         self._cache_access_time: dict[str, float] = {}
+        # 请求锁，防止并发请求同一资源时产生重复外部请求
+        self._request_locks: dict[str, asyncio.Lock] = {}
 
     def _log_api_data(self, endpoint: str, data: dict):
         """记录API源数据到日志
@@ -139,19 +143,38 @@ class Splatoon3Client:
 
         current_time = time.time()
         expired_keys = []
+        least_recently_used = []
         
         async with self._cache_lock:
+            # 清理过期缓存
             for cache_key, cached in self._cache.items():
                 if current_time - cached["timestamp"] >= self.cache_ttl:
                     expired_keys.append(cache_key)
+                else:
+                    # 收集未过期的缓存，用于LRU淘汰
+                    access_time = self._cache_access_time.get(cache_key, cached["timestamp"])
+                    least_recently_used.append((access_time, cache_key))
             
+            # 删除过期缓存
             for cache_key in expired_keys:
                 del self._cache[cache_key]
                 if cache_key in self._cache_access_time:
                     del self._cache_access_time[cache_key]
+            
+            # 当缓存大小超过阈值时，使用LRU策略删除最久未使用的缓存
+            if len(self._cache) > self.max_cache_size:
+                # 按访问时间排序，删除最久未使用的
+                least_recently_used.sort(key=lambda x: x[0])
+                to_remove = least_recently_used[:len(self._cache) - self.max_cache_size]
+                for _, cache_key in to_remove:
+                    if cache_key in self._cache:
+                        del self._cache[cache_key]
+                        if cache_key in self._cache_access_time:
+                            del self._cache_access_time[cache_key]
+                        expired_keys.append(cache_key)
         
         if expired_keys:
-            logger.info(f"[Splatoon3] 清理了 {len(expired_keys)} 个过期缓存")
+            logger.info(f"[Splatoon3] 清理了 {len(expired_keys)} 个缓存（过期+LRU淘汰）")
 
     async def _get_session(self):
         """获取或创建aiohttp ClientSession"""
@@ -193,57 +216,97 @@ class Splatoon3Client:
                 "data": data,
                 "timestamp": time.time(),
             }
+            # 记录访问时间
+            self._cache_access_time[cache_key] = time.time()
+            # 每次设置新缓存时，随机触发一次过期缓存清理（概率10%）
+            if len(self._cache) > 10 and hash(cache_key) % 10 == 0:
+                await self._cleanup_expired_cache()
 
     async def _fetch_data(self, endpoint: str) -> dict:
         """从API获取数据"""
+        # 先尝试从缓存获取
         cached = await self._get_cached_data(endpoint)
         if cached is not None:
             self._log_api_data(f"{endpoint} (cached)", cached)
             return cached
 
-        url = f"{self.BASE_URL}/{endpoint}"
+        # 获取请求锁，防止并发请求同一资源
+        cache_key = self._get_cache_key(endpoint)
+        if cache_key not in self._request_locks:
+            self._request_locks[cache_key] = asyncio.Lock()
+        request_lock = self._request_locks[cache_key]
 
-        # 使用复用的ClientSession
-        session = await self._get_session()
-        try:
-            async with session.get(url) as response:
-                if response.status != 200:
-                    raise Splatoon3DataError(f"API请求失败: {response.status}")
-                try:
-                    data = await response.json()
-                except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
-                    raise Splatoon3DataError(f"JSON解析失败: {str(e)}") from e
-                await self._set_cached_data(endpoint, data)
-                self._log_api_data(endpoint, data)
-                return data
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise Splatoon3NetworkError(f"网络请求失败: {str(e)}") from e
+        async with request_lock:
+            # 再次检查缓存，可能在等待锁的过程中已经被其他请求缓存
+            cached = await self._get_cached_data(endpoint)
+            if cached is not None:
+                self._log_api_data(f"{endpoint} (cached after lock)", cached)
+                return cached
+
+            url = f"{self.BASE_URL}/{endpoint}"
+
+            # 使用复用的ClientSession
+            session = await self._get_session()
+            try:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        raise Splatoon3DataError(f"API请求失败: {response.status}")
+                    try:
+                        data = await response.json()
+                    except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
+                        raise Splatoon3DataError(f"JSON解析失败: {str(e)}") from e
+                    await self._set_cached_data(endpoint, data)
+                    self._log_api_data(endpoint, data)
+                    return data
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise Splatoon3DataError(f"网络请求失败: {str(e)}") from e
+            except Exception as e:
+                if not isinstance(e, Splatoon3APIError):
+                    raise Splatoon3DataError(f"获取数据失败: {str(e)}") from e
+                raise
 
     async def _get_locale(self) -> dict:
         """获取本地化数据"""
+        # 先尝试从缓存获取
         async with self._cache_lock:
             if self.language in self._locale_cache:
                 return self._locale_cache[self.language]
 
-        url = f"{self.BASE_URL}/locale/{self.language}.json"
+        # 获取请求锁，防止并发请求同一语言的本地化数据
+        locale_key = f"locale_{self.language}"
+        if locale_key not in self._request_locks:
+            self._request_locks[locale_key] = asyncio.Lock()
+        request_lock = self._request_locks[locale_key]
 
-        # 使用复用的ClientSession
-        session = await self._get_session()
-        try:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    try:
-                        locale_data = await response.json()
-                    except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
-                        raise Splatoon3DataError(f"JSON解析失败: {str(e)}") from e
-                    async with self._cache_lock:
-                        self._locale_cache[self.language] = locale_data
-                    self._log_api_data(f"locale/{self.language}.json", locale_data)
-                    return locale_data
-                else:
-                    raise Splatoon3DataError(f"获取本地化数据失败: {response.status}")
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            raise Splatoon3NetworkError(f"网络请求失败: {str(e)}") from e
+        async with request_lock:
+            # 再次检查缓存，可能在等待锁的过程中已经被其他请求缓存
+            async with self._cache_lock:
+                if self.language in self._locale_cache:
+                    return self._locale_cache[self.language]
+
+            url = f"{self.BASE_URL}/locale/{self.language}.json"
+
+            # 使用复用的ClientSession
+            session = await self._get_session()
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        try:
+                            locale_data = await response.json()
+                        except (json.JSONDecodeError, aiohttp.ContentTypeError) as e:
+                            raise Splatoon3DataError(f"JSON解析失败: {str(e)}") from e
+                        async with self._cache_lock:
+                            self._locale_cache[self.language] = locale_data
+                        self._log_api_data(f"locale/{self.language}.json", locale_data)
+                        return locale_data
+                    else:
+                        raise Splatoon3DataError(f"获取本地化数据失败: {response.status}")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                raise Splatoon3DataError(f"网络请求失败: {str(e)}") from e
+            except Exception as e:
+                if not isinstance(e, Splatoon3APIError):
+                    raise Splatoon3DataError(f"获取本地化数据失败: {str(e)}") from e
+                raise
 
     def _translate_by_id(self, item_id: str, locale: dict, category: str = "stages", field: str = "name") -> str:
         """根据ID翻译
@@ -430,6 +493,7 @@ class Splatoon3Client:
         return {
             "start_time": self._format_time(schedule.get("startTime")),
             "end_time": self._format_time(schedule.get("endTime")),
+            "start_timestamp": schedule.get("startTime"),  # 添加原始时间戳用于排序
             "stage": self._translate_by_id(stage.get("id"), locale, "stages") or stage.get("name", ""),
             "weapons": [self._translate_by_id(w.get("__splatoon3ink_id"), locale, "weapons") or w.get("name", "") for w in setting.get("weapons", [])],
             "boss": self._translate_by_id(boss.get("id"), locale, "bosses") or boss.get("name", ""),
@@ -453,8 +517,8 @@ class Splatoon3Client:
         for schedule in big_run_schedules:
             result.append(self._parse_salmon_run_schedule(schedule, locale, "大规模鲑鱼跑"))
 
-        # 按开始时间排序
-        result.sort(key=lambda x: x["start_time"])
+        # 按原始时间戳排序，避免格式化字符串排序问题
+        result.sort(key=lambda x: x.get("start_timestamp", 0))
 
         return result
 
