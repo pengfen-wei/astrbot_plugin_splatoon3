@@ -147,8 +147,10 @@ class Splatoon3Plugin(Star):
                 sender_id = event.get_sender_id()
                 if sender_id is not None and sender_id != '':
                     sender_id = str(sender_id)
-            except Exception:
-                pass
+            except (AttributeError, TypeError, Exception) as e:
+                if self.debug:
+                    logger.debug(f"[Splatoon3] 调用get_sender_id()失败: {str(e)}")
+                # 继续尝试其他方法
         
         # 回退到传统属性获取方式（兼容不同平台）
         if sender_id is None:

@@ -196,15 +196,6 @@ class Splatoon3Client:
                 await self._session.close()
                 self._session = None
 
-    async def __aenter__(self):
-        """异步上下文管理器入口"""
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """异步上下文管理器出口"""
-        await self.close()
-        return None
-
     async def _set_cached_data(self, endpoint: str, data: dict):
         """设置缓存数据"""
         if not self.cache_enabled:
